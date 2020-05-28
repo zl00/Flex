@@ -13,7 +13,7 @@ import Cocoa
  */
 protocol FlexComponent {
     
-    // MARK: --
+    // MARK: -- Flex
     
     var flex: Int { get }
     var childrenNodes: [FlexComponent] { get }
@@ -22,47 +22,64 @@ protocol FlexComponent {
     
     /// Determined by parrent component
     var staticWidth: CGFloat? { get set }
+    /// Update `staticWidth`
+    /// - Parameter width: set width
+    func updateStaticWidth(width: CGFloat)
     /// Determined by children components
     var dynamicWidth: CGFloat? { get set }
+    /// Update `dynamicWidth`
+    /// - Note: `staticWidth` and `dynamicWidth` is mutex. Make sure that `staticWidth` is not set before calling this function
+    /// - Parameter remainWidth: remains width
     func updateDynamicWidth(remainWidth: CGFloat)
-    var width: CGFloat { get } // TODO: 好好设计这个接口
+    /// Make sure `staticWidth` or `dynamicWidth` is set before calling this function
+    var width: CGFloat { get }
     
     // MARK: -- Height
     
     /// Determined by own content
     var fittingHeight: CGFloat? { get set }
+    /// Update `fittingHeight`
+    /// - Parameter width: own actual width
     func updateFittingHeight(width: CGFloat)
     /// Determined by flex
     var flexedHeight: CGFloat? { get set }
+    /// Update `flexedHeight`
     func updateFlexedHeight(height: CGFloat)
+    /// Make sure `fittingHeight` or `flexedHeight` is set before calling this function
     var height: CGFloat { get }
+    
+    // MARK: -- Debug
+    
+    func trace(_ level: Int)
 }
 
 extension FlexComponent {
+    
     var width: CGFloat {
-        print("\(self)")
         return staticWidth ?? dynamicWidth!
     }
     
     var height: CGFloat {
         return flexedHeight ?? fittingHeight!
     }
+    
+    func trace(_ level: Int) {
+        var blank = ""
+        (0..<level).forEach { _ in blank.append("\t") }
+        print("\(blank)>>>\(level)\t\(self) | W: \(width), H: \(height)")
+        childrenNodes.forEach { $0.trace(level+1) }
+    }
 }
 
 class HBox: FlexComponent {
+    
     let flex: Int
     var childrenNodes: [FlexComponent]
     
-    var staticWidth: CGFloat? {
-        didSet {
-            guard let width = staticWidth else { return }
-            updateFittingHeight(width: width)
-        }
-    }
+    var staticWidth: CGFloat?
     var dynamicWidth: CGFloat? {
         didSet {
-            guard let width = dynamicWidth else { return }
-            updateFittingHeight(width: width)
+            updateFittingHeight(width: dynamicWidth ?? 0.0)
         }
     }
     var fittingHeight: CGFloat?
@@ -73,36 +90,44 @@ class HBox: FlexComponent {
         self.childrenNodes = childrenNodes
     }
     
+    func updateStaticWidth(width: CGFloat) {
+        self.staticWidth = width
+        
+        _refreshChildrenWidth(remainWidth: width)
+        
+        updateFittingHeight(width: width)
+    }
+    
     func updateDynamicWidth(remainWidth: CGFloat) {
         guard staticWidth == nil else { assertionFailure(); dynamicWidth = nil; return }
         guard remainWidth > 0.0 else { dynamicWidth = 0.0; return }
         
+        _refreshChildrenWidth(remainWidth: remainWidth)
+        
+        /// 🌈width = `sum(width of children)`
+        self.dynamicWidth = childrenNodes.reduce(0.0) { $0 + $1.width }
+    }
+    
+    private func _refreshChildrenWidth(remainWidth: CGFloat) {
         var remains = remainWidth
         
-        /// dynamic: determined by the children
+        /// dynamic: [prior] determined by the children
         childrenNodes.filter { $0.flex == 0 }.forEach {
             $0.updateDynamicWidth(remainWidth: remains)
-            guard let w = $0.staticWidth ?? $0.dynamicWidth else { assertionFailure(); return }
-            assert(w <= remains && w >= 0.0)
-            remains = max(0.0, remains - w)
+            assert($0.width <= remains && $0.width >= 0.0)
+            remains = max(0.0, remains - $0.width)
         }
         
         /// static: determine the width of children
         let sumFlex = childrenNodes.reduce(0) { $0 + $1.flex }
-        childrenNodes = childrenNodes.map {
-            guard $0.flex != 0 else { return $0 }
-            var result = $0
-            result.staticWidth = max(remains / CGFloat(sumFlex), 0.0)
-            return result
-        }
-        
-        /// 🌈width = `sum(width of children)`
-        self.dynamicWidth = childrenNodes.reduce(CGFloat(0.0)) {
-            return $0 + ($1.staticWidth ?? ($1.dynamicWidth ?? 0.0)) // TODO: - Linda 换成width接口,可以check的
+        childrenNodes.filter { $0.flex != 0 }.forEach {
+            $0.updateStaticWidth(width: max(remains / CGFloat(sumFlex), 0.0))
         }
     }
     
     func updateFittingHeight(width: CGFloat) {
+        guard width > 0.0 else { self.flexedHeight = 0.0; return }
+        
         /// update fittingHeight of children
         childrenNodes.forEach {
             $0.updateFittingHeight(width: $0.width)
@@ -119,7 +144,7 @@ class HBox: FlexComponent {
     }
     
     func updateFlexedHeight(height: CGFloat) {
-        assert(fittingHeight! < height && flexedHeight == nil)
+        assert(fittingHeight! < height)
         
         self.flexedHeight = height
         self.childrenNodes.forEach {
@@ -132,12 +157,7 @@ class VBox: FlexComponent {
     let flex: Int
     let childrenNodes: [FlexComponent]
     
-    var staticWidth: CGFloat? {
-        didSet {
-            guard let width = staticWidth else { return }
-            updateFittingHeight(width: width)
-        }
-    }
+    var staticWidth: CGFloat?
     var dynamicWidth: CGFloat? {
         didSet {
             guard let width = dynamicWidth else { return }
@@ -152,16 +172,26 @@ class VBox: FlexComponent {
         self.childrenNodes = childrenNodes
     }
     
+    func updateStaticWidth(width: CGFloat) {
+        self.staticWidth = width
+        _refreshChildrenWidth(remainWidth: width)
+        updateFittingHeight(width: width)
+    }
+    
     func updateDynamicWidth(remainWidth: CGFloat) {
         guard staticWidth == nil else { assertionFailure(); dynamicWidth = nil; return }
         guard remainWidth > 0.0 else { dynamicWidth = 0.0; return }
         
+        _refreshChildrenWidth(remainWidth: remainWidth)
+        
+        /// 🌈width = `max(width of children)`
+        self.dynamicWidth = min(remainWidth, childrenNodes.compactMap { $0.width }.max() ?? 0.0)
+    }
+    
+    private func _refreshChildrenWidth(remainWidth: CGFloat) {
         childrenNodes.forEach {
             $0.updateDynamicWidth(remainWidth: remainWidth)
         }
-        
-        /// 🌈width = `max(width of children)`
-        self.dynamicWidth = min(remainWidth, childrenNodes.compactMap { $0.staticWidth ?? $0.dynamicWidth }.max() ?? 0.0)
     }
     
     func updateFittingHeight(width: CGFloat) {
@@ -175,7 +205,7 @@ class VBox: FlexComponent {
     }
     
     func updateFlexedHeight(height: CGFloat) {
-        assert(fittingHeight! < height && flexedHeight == nil)
+        assert(fittingHeight! < height)
         self.flexedHeight = height
         
         /// static: determine the width of children
@@ -195,12 +225,7 @@ class Text: FlexComponent {
     let text: String
     let childrenNodes: [FlexComponent] = []
     
-    var staticWidth: CGFloat? {
-        didSet {
-            guard let width = staticWidth else { return }
-            updateFittingHeight(width: width)
-        }
-    }
+    var staticWidth: CGFloat?
     var dynamicWidth: CGFloat? {
         didSet {
             guard let width = dynamicWidth else { return }
@@ -213,6 +238,11 @@ class Text: FlexComponent {
     init(text: String, flex: Int = 1) {
         self.text = text
         self.flex = flex
+    }
+    
+    func updateStaticWidth(width: CGFloat) {
+        self.staticWidth = width
+        updateFittingHeight(width: width)
     }
     
     func updateDynamicWidth(remainWidth: CGFloat) {
@@ -237,12 +267,7 @@ class Image: FlexComponent {
     let theorySize: CGSize
     let childrenNodes: [FlexComponent] = []
     
-    var staticWidth: CGFloat? {
-        didSet {
-            guard let width = staticWidth else { return }
-            updateFittingHeight(width: width)
-        }
-    }
+    var staticWidth: CGFloat?
     var dynamicWidth: CGFloat? {
         didSet {
             guard let width = dynamicWidth else { return }
@@ -255,6 +280,11 @@ class Image: FlexComponent {
     init(theorySize: CGSize = CGSize(width: 50, height: 50), flex: Int = 1) {
         self.theorySize = theorySize
         self.flex = flex
+    }
+    
+    func updateStaticWidth(width: CGFloat) {
+        self.staticWidth = width
+        updateFittingHeight(width: width)
     }
     
     func updateDynamicWidth(remainWidth: CGFloat) {
@@ -272,8 +302,6 @@ class Image: FlexComponent {
         self.flexedHeight = height
     }
 }
-
-
 
 // MARK: - TEST
 
@@ -353,13 +381,49 @@ func test4() {
         ])
     ])
     
-    rootNode.updateDynamicWidth(remainWidth: 250)
-//    rootNode.updateFittingHeight(width: 250)
-    
-//    print("test1 >>> \(rootNode.width) \(rootNode.height)")
-    
-//    rootNode.childrenNodes.forEach {
-//        print("test1 >>> \($0) \($0.width) \($0.height)")
-//    }
+    rootNode.updateDynamicWidth(remainWidth: 500)
+    rootNode.updateFittingHeight(width: 250)
+    rootNode.trace(0)
 }
 test4()
+
+func test5() {
+    defer { print("🌳🌳🌳🌳🌳 test5 end") }
+    print("")
+    print("🌳🌳🌳🌳🌳 test5 start")
+    
+    let rootNode = HBox(childrenNodes: [
+        Text.init(text: "hello 2", flex: 1),
+        VBox.init(flex: 1, childrenNodes: [
+            Image.init(theorySize: CGSize.init(width: 300, height: 150), flex: 1),
+            Image.init(theorySize: CGSize.init(width: 300, height: 150), flex: 3)
+        ])
+    ])
+    
+    rootNode.updateDynamicWidth(remainWidth: 500)
+    rootNode.updateFittingHeight(width: 250)
+    rootNode.trace(0)
+}
+test5()
+
+
+func test6() {
+    defer { print("🌳🌳🌳🌳🌳 test6 end") }
+    print("")
+    print("🌳🌳🌳🌳🌳 test6 start")
+    
+    let rootNode = HBox(childrenNodes: [
+        Text.init(text: "hello 2", flex: 1),
+        VBox.init(flex: 1, childrenNodes: [
+            VBox.init(flex: 0, childrenNodes: [ // TODO: 这里计算❌,估计是递归的地方错了. 以后确定该方案的时候再修改!
+                Image.init(theorySize: CGSize.init(width: 300, height: 150), flex: 1),
+                Image.init(theorySize: CGSize.init(width: 300, height: 150), flex: 3)
+            ])
+        ])
+    ])
+    
+    rootNode.updateDynamicWidth(remainWidth: 500)
+    rootNode.updateFittingHeight(width: 250)
+    rootNode.trace(0)
+}
+test6()
